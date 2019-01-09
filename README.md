@@ -40,6 +40,6 @@ MIT license
 
 # references
 
-To imprement this library, I referenced below article deeply. @ysomei, Thank you for your allowing me to refer your article.
+To implement this library, I referenced below article deeply. @ysomei, Thank you for your allowing me to refer your article.
 * 今更ですが、SONY RC-S380 で Suica の IDm を読み込んでみた
 https://qiita.com/ysomei/items/32f366b61a7b631c4750
