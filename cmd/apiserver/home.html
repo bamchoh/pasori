@@ -16,18 +16,6 @@
 					}
 				}
 
-				document.getElementById("form").onsubmit = function () {
-					if (!conn) {
-						return false;
-					}
-					if (!msg.value) {
-						return false;
-					}
-					conn.send(msg.value);
-					msg.value = "";
-					return false;
-				};
-
 				if (window["WebSocket"]) {
 					conn = new WebSocket("ws://" + document.location.host + "/ws");
 					conn.onclose = function (evt) {
@@ -35,13 +23,22 @@
 						item.innerHTML = "<b>Connection closed.</b>";
 						appendLog(item);
 					};
+					conn.onopen = function (evt) {
+						var item = document.createElement("div");
+						item.innerHTML = "<b>Connection open.</b>";
+						appendLog(item);
+						var item = document.createElement("div");
+						item.innerHTML = "<b>Please touch your NFC card</b>";
+						appendLog(item);
+					}
 					conn.onmessage = function (evt) {
 						var messages = evt.data.split('\n');
 						for (var i = 0; i < messages.length; i++) {
 							var item = document.createElement("div");
-							item.innerText = messages[i];
+							item.innerText = "Your NFC card ID is " + messages[i];
 							appendLog(item);
 						}
+						conn.close();
 					};
 				} else {
 					var item = document.createElement("div");
@@ -90,9 +87,5 @@ body {
 	</head>
 	<body>
 		<div id="log"></div>
-		<form id="form">
-			<input type="submit" value="Send" />
-			<input type="text" id="msg" size="64"/>
-		</form>
 	</body>
 </html>
