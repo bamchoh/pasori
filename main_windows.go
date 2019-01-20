@@ -1,18 +1,13 @@
 // build windows
 
-package main
+package pasori
 
 import (
-	"fmt"
-	"log"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/lxn/win"
-)
-
-var (
-	POLLING_ANY uint16 = 0xFFFF
 )
 
 func h2ns(x uint16) uint16 {
@@ -41,7 +36,7 @@ type pasori struct {
 	writeBlockWithoutEncryption  *syscall.Proc
 }
 
-func (p *pasori) felicaPolling(systemcode uint16, rfu uint8, timeslot uint8) (*felica, error) {
+func (p *pasori) felicaPolling(systemcode uint16, timeslot uint8) (*felica, error) {
 	f := felica{}
 	sc := h2ns(systemcode)
 	poll := polling{
@@ -55,7 +50,13 @@ func (p *pasori) felicaPolling(systemcode uint16, rfu uint8, timeslot uint8) (*f
 	var numberOfCards uint8
 	ret, _, err := p.pollingAndGetCardInformation.Call(uintptr(unsafe.Pointer(&poll.systemcode)), uintptr(unsafe.Pointer(&numberOfCards)), uintptr(unsafe.Pointer(&card.cardIdm)))
 	if ret == 0 {
+		if err.(syscall.Errno) == 0 {
+			return nil, nil
+		}
 		return nil, err
+	}
+	if f.isAllZero() {
+		return nil, nil
 	}
 	return &f, nil
 }
@@ -65,11 +66,25 @@ type felica struct {
 	PMm [8]uint8
 }
 
-func main() {
+func (f *felica) isAllZero() bool {
+	for _, v := range f.IDm {
+		if v != 0 {
+			return false
+		}
+	}
+	for _, v := range f.PMm {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func GetID(vid, pid uint16) ([]byte, error) {
 	basepath := "C:\\Program Files\\Common Files\\Sony Shared\\FeliCaLibrary"
 	dll, err := syscall.LoadDLL(basepath + "\\" + "felica.dll")
 	if err != nil {
-		log.Fatal("LoadDLL: ", err)
+		return nil, err
 	}
 	defer dll.Release()
 
@@ -77,87 +92,49 @@ func main() {
 
 	p.initializeLibrary, err = dll.FindProc("initialize_library")
 	if err != nil {
-		log.Fatal("FindProc: ", err)
+		return nil, err
 	}
 
 	p.disposeLibrary, err = dll.FindProc("dispose_library")
 	if err != nil {
-		log.Fatal("FindProc: ", err)
+		return nil, err
 	}
 
 	p.openReaderWriterAuto, err = dll.FindProc("open_reader_writer_auto")
 	if err != nil {
-		log.Fatal("FindProc: ", err)
-	}
-
-	p.closeReaderWriter, err = dll.FindProc("close_reader_writer")
-	if err != nil {
-		log.Fatal("FindProc: ", err)
+		return nil, err
 	}
 
 	p.pollingAndGetCardInformation, err = dll.FindProc("polling_and_get_card_information")
 	if err != nil {
-		log.Fatal("FindProc: ", err)
-	}
-
-	p.pollingAndRequestSystemCode, err = dll.FindProc("polling_and_request_system_code")
-	if err != nil {
-		log.Fatal("FindProc: ", err)
-	}
-
-	p.pollingAndSearchServiceCode, err = dll.FindProc("polling_and_search_service_code")
-	if err != nil {
-		log.Fatal("FindProc: ", err)
-	}
-
-	p.readBlockWithoutEncryption, err = dll.FindProc("read_block_without_encryption")
-	if err != nil {
-		log.Fatal("FindProc: ", err)
-	}
-
-	p.writeBlockWithoutEncryption, err = dll.FindProc("write_block_without_encryption")
-	if err != nil {
-		log.Fatal("FindProc: ", err)
+		return nil, err
 	}
 
 	win.SetLastError(0)
 	ret, _, err := p.initializeLibrary.Call()
 	// errno = 128 が返ってくるが felicalib でも返ってくるのでerrチェックはせずに無視する
 	if ret == 0 {
-		fmt.Println("Failed to initialize felica")
-		fmt.Println(err)
-		return
+		return nil, err
 	}
 
 	ret, _, err = p.openReaderWriterAuto.Call()
 	if ret == 0 {
-		fmt.Println("Failed to open felica")
-		fmt.Println(err)
-		return
+		return nil, err
 	}
+	defer p.disposeLibrary.Call()
 
-	f, err := p.felicaPolling(POLLING_ANY, 0, 0)
-	if err != nil {
-		fmt.Println("Faild to poll felica")
-		fmt.Println(err)
-		return
-	}
-
-	fmt.Print("IDm: ")
-	for i, v := range f.IDm {
-		if i != 0 {
-			fmt.Print(" ")
+	var f *felica
+	isloop := true
+	for isloop {
+		f, err = p.felicaPolling(0xFFFF, 0) // 0xFFFF is POLLING_ANY
+		if err != nil {
+			return nil, err
 		}
-		fmt.Printf("%02X", v)
-	}
-	fmt.Println()
-
-	fmt.Print("PMm: ")
-	for i, v := range f.PMm {
-		if i != 0 {
-			fmt.Print(" ")
+		if f != nil {
+			isloop = false
 		}
-		fmt.Printf("%02X", v)
+		time.Sleep(1 * time.Millisecond)
 	}
-	fmt.Println()
+
+	return f.IDm[:], nil
 }
