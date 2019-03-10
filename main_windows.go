@@ -45,6 +45,20 @@ type outstrReadBlock struct {
 	blockData            uintptr
 }
 
+type instrWriteBlock struct {
+	cardIdm          uintptr
+	numberOfServices uint8
+	serviceCodeList  uintptr
+	numberOfBlocks   uint8
+	blockList        uintptr
+	blockData        uintptr
+}
+
+type outstrWriteBlock struct {
+	statusFlag1 uintptr
+	statusFlag2 uintptr
+}
+
 type instrSearchService struct {
 	bufferSizeOfAreaCodes    int
 	bufferSizeOfServiceCodes int
@@ -160,14 +174,57 @@ func (p *pasori) felicaReadWithoutEncryption(idm *[8]uint8, servicecode uint16, 
 		resultNumberOfBlocks: uintptr(unsafe.Pointer(&resultNumberOfBlocks)),
 		blockData:            uintptr(unsafe.Pointer(&blockData[0])),
 	}
+
 	ret, _, err := p.readBlockWithoutEncryption.Call(uintptr(unsafe.Pointer(&irb.cardIdm)), uintptr(unsafe.Pointer(&orb.statusFlag1)))
+
 	if ret == 0 {
 		if err.(syscall.Errno) == 0 {
 			return nil, nil
 		}
 		return nil, err
 	}
+
 	return blockData[:], nil
+}
+
+func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16, blknum uint8, data []byte) error {
+	var serviceCode [2]uint8
+	serviceCode[0] = uint8(servicecode & 0xff)
+	serviceCode[1] = uint8(servicecode >> 8)
+
+	var blockList [2]uint8
+	blockList[0] = 0x80
+	blockList[1] = blknum
+
+	var blockData [16]uint8
+	for i := 0; i < len(blockData); i++ {
+		blockData[i] = data[i]
+	}
+
+	iwr := instrWriteBlock{
+		cardIdm:          uintptr(unsafe.Pointer(&idm[0])),
+		numberOfServices: 1,
+		serviceCodeList:  uintptr(unsafe.Pointer(&serviceCode[0])),
+		numberOfBlocks:   1,
+		blockList:        uintptr(unsafe.Pointer(&blockList[0])),
+		blockData:        uintptr(unsafe.Pointer(&blockData[0])),
+	}
+
+	var statusFlag1 uint8
+	var statusFlag2 uint8
+
+	owr := outstrWriteBlock{
+		statusFlag1: uintptr(unsafe.Pointer(&statusFlag1)),
+		statusFlag2: uintptr(unsafe.Pointer(&statusFlag2)),
+	}
+	ret, _, err := p.writeBlockWithoutEncryption.Call(uintptr(unsafe.Pointer(&iwr.cardIdm)), uintptr(unsafe.Pointer(&owr.statusFlag1)))
+	if ret == 0 {
+		if err.(syscall.Errno) == 0 {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (p *pasori) Release() {
@@ -191,6 +248,19 @@ func (p *pasori) FelicaReadWithoutEncryption() ([]byte, error) {
 		idmary[i] = idm[i]
 	}
 	return p.felicaReadWithoutEncryption(&idmary, 9, 0)
+}
+
+func (p *pasori) FelicaWriteWithoutEncryption(data []byte) error {
+	win.SetLastError(0)
+	idm, err := p.GetIdm()
+	if err != nil {
+		return err
+	}
+	var idmary [8]uint8
+	for i := 0; i < len(idmary); i++ {
+		idmary[i] = idm[i]
+	}
+	return p.felicaWriteWithoutEncryption(&idmary, 9, 0, data)
 }
 
 func (p *pasori) GetIdm() ([]byte, error) {
@@ -269,6 +339,11 @@ func InitPasori() (*pasori, error) {
 	}
 
 	p.readBlockWithoutEncryption, err = dll.FindProc("read_block_without_encryption")
+	if err != nil {
+		return nil, err
+	}
+
+	p.writeBlockWithoutEncryption, err = dll.FindProc("write_block_without_encryption")
 	if err != nil {
 		return nil, err
 	}
