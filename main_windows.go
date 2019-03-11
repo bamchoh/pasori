@@ -237,7 +237,7 @@ func (p *pasori) FelicaEnumService() (*felica, error) {
 	return p.felicaEnumService(0xFFFF)
 }
 
-func (p *pasori) FelicaReadWithoutEncryption() ([]byte, error) {
+func (p *pasori) FelicaReadWithoutEncryption(blkno uint8) ([]byte, error) {
 	win.SetLastError(0)
 	idm, err := p.GetIdm()
 	if err != nil {
@@ -247,10 +247,10 @@ func (p *pasori) FelicaReadWithoutEncryption() ([]byte, error) {
 	for i := 0; i < len(idmary); i++ {
 		idmary[i] = idm[i]
 	}
-	return p.felicaReadWithoutEncryption(&idmary, 9, 0)
+	return p.felicaReadWithoutEncryption(&idmary, 9, blkno)
 }
 
-func (p *pasori) FelicaWriteWithoutEncryption(data []byte) error {
+func (p *pasori) FelicaWriteWithoutEncryption(blkno uint8, data []byte) error {
 	win.SetLastError(0)
 	idm, err := p.GetIdm()
 	if err != nil {
@@ -260,7 +260,7 @@ func (p *pasori) FelicaWriteWithoutEncryption(data []byte) error {
 	for i := 0; i < len(idmary); i++ {
 		idmary[i] = idm[i]
 	}
-	return p.felicaWriteWithoutEncryption(&idmary, 9, 0, data)
+	return p.felicaWriteWithoutEncryption(&idmary, 9, blkno, data)
 }
 
 func (p *pasori) GetIdm() ([]byte, error) {
