@@ -16,6 +16,48 @@ const (
 	MAX_SERVICE_CODE = 256
 )
 
+const (
+	S_PAD0 = iota
+	S_PAD1
+	S_PAD2
+	S_PAD3
+	S_PAD4
+	S_PAD5
+	S_PAD6
+	S_PAD7
+	S_PAD8
+	S_PAD9
+	S_PAD10
+	S_PAD11
+	S_PAD12
+	S_PAD13
+	REG
+)
+
+const (
+	RC = iota + 0x80
+	MAC
+	ID
+	D_ID
+	SER_C
+	SYS_C
+	CKV
+	CK
+	MC
+)
+
+const (
+	WCNT = iota + 0x90
+	MAC_A
+	STATE
+	CRC_CHECK = 0xA0
+)
+
+const (
+	SERVICE_RW = 0x09
+	SERVICE_RO = 0x0B
+)
+
 func h2ns(x uint16) uint16 {
 	return (((x)>>8)&0xff | ((x)<<8)&0xff00)
 }
@@ -146,40 +188,42 @@ func (p *pasori) felicaPolling(systemcode uint16, timeslot uint8) (*felica, erro
 	return &f, nil
 }
 
-func (p *pasori) felicaReadWithoutEncryption(idm *[8]uint8, servicecode uint16, blknum uint8) ([]byte, error) {
+func (p *pasori) felicaReadWithoutEncryption(idm *[8]uint8, servicecode uint16, blknum ...uint8) ([][16]byte, error) {
 	var serviceCode [2]uint8
 	serviceCode[0] = uint8(servicecode & 0xff)
 	serviceCode[1] = uint8(servicecode >> 8)
 
-	var blockList [2]uint8
-	blockList[0] = 0x80
-	blockList[1] = blknum
+	blockList := make([]byte, len(blknum)*2)
+	for i := 0; i < len(blknum); i++ {
+		blockList[2*i] = 0x80
+		blockList[2*i+1] = blknum[i]
+	}
 
 	irb := instrReadBlock{
 		cardIdm:          uintptr(unsafe.Pointer(&idm[0])),
 		numberOfServices: 1,
 		serviceCodeList:  uintptr(unsafe.Pointer(&serviceCode[0])),
-		numberOfBlocks:   1,
+		numberOfBlocks:   uint8(len(blknum)),
 		blockList:        uintptr(unsafe.Pointer(&blockList[0])),
 	}
 
 	var statusFlag1 uint8
 	var statusFlag2 uint8
 	var resultNumberOfBlocks uint8
-	var blockData [16]uint8
+	blockData := make([][16]uint8, len(blknum))
 
 	orb := outstrReadBlock{
 		statusFlag1:          uintptr(unsafe.Pointer(&statusFlag1)),
 		statusFlag2:          uintptr(unsafe.Pointer(&statusFlag2)),
 		resultNumberOfBlocks: uintptr(unsafe.Pointer(&resultNumberOfBlocks)),
-		blockData:            uintptr(unsafe.Pointer(&blockData[0])),
+		blockData:            uintptr(unsafe.Pointer(&blockData[0][0])),
 	}
 
 	ret, _, err := p.readBlockWithoutEncryption.Call(uintptr(unsafe.Pointer(&irb.cardIdm)), uintptr(unsafe.Pointer(&orb.statusFlag1)))
 
 	if ret == 0 {
 		if err.(syscall.Errno) == 0 {
-			return nil, nil
+			return blockData[:], nil
 		}
 		return nil, err
 	}
@@ -237,7 +281,7 @@ func (p *pasori) FelicaEnumService() (*felica, error) {
 	return p.felicaEnumService(0xFFFF)
 }
 
-func (p *pasori) FelicaReadWithoutEncryption(blkno uint8) ([]byte, error) {
+func (p *pasori) FelicaReadWithoutEncryption(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
 	win.SetLastError(0)
 	idm, err := p.GetIdm()
 	if err != nil {
@@ -247,7 +291,7 @@ func (p *pasori) FelicaReadWithoutEncryption(blkno uint8) ([]byte, error) {
 	for i := 0; i < len(idmary); i++ {
 		idmary[i] = idm[i]
 	}
-	return p.felicaReadWithoutEncryption(&idmary, 9, blkno)
+	return p.felicaReadWithoutEncryption(&idmary, servicecode, blkno...)
 }
 
 func (p *pasori) FelicaWriteWithoutEncryption(blkno uint8, data []byte) error {
