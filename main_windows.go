@@ -3,6 +3,9 @@
 package pasori
 
 import (
+	"bytes"
+	"crypto/des"
+	"errors"
 	"fmt"
 	"syscall"
 	"time"
@@ -57,6 +60,73 @@ const (
 	SERVICE_RW = 0x09
 	SERVICE_RO = 0x0B
 )
+
+func des1(seed, data, prev []byte) ([]byte, []byte, error) {
+	if len(seed) < 16 {
+		return nil, nil, errors.New("Length of seed is less than 16")
+	}
+	if len(data) < 16 {
+		return nil, nil, errors.New("Length of data is less than 16")
+	}
+	if len(prev) < 8 {
+		return nil, nil, errors.New("Length of prev is less than 8")
+	}
+
+	o1, sk1, err := des2(seed[:8], seed[8:], data[:8], prev)
+	if err != nil {
+		return nil, nil, err
+	}
+	o2, sk2, err := des2(seed[:8], seed[8:], data[8:], o1)
+	if err != nil {
+		return nil, nil, err
+	}
+	sk := make([]byte, 16)
+	copy(sk[:8], sk1)
+	copy(sk[8:], sk2)
+	return o2, sk, nil
+}
+
+func des2(key1, key2, in1, prev []byte) ([]byte, []byte, error) {
+	if len(key1) < 8 {
+		return nil, nil, errors.New("Length of key1 is less than 8")
+	}
+	if len(key2) < 8 {
+		return nil, nil, errors.New("Length of key2 is less than 8")
+	}
+
+	key := make([]byte, 24)
+	copy(key[:8], reverse(key1))
+	copy(key[8:16], reverse(key2))
+	copy(key[16:], reverse(key1))
+
+	c, err := des.NewTripleDESCipher(key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	in := xor(reverse(in1), prev)
+	enc := make([]byte, des.BlockSize)
+
+	c.Encrypt(enc, in)
+
+	return enc, reverse(enc), nil
+}
+
+func xor(a []byte, b []byte) []byte {
+	c := make([]byte, len(a))
+	for i := 0; i < len(a); i++ {
+		c[i] = a[i] ^ b[i]
+	}
+	return c
+}
+
+func reverse(b []byte) []byte {
+	a := make([]byte, len(b))
+	for i, j := 0, len(b)-1; i < len(b); i, j = i+1, j-1 {
+		a[i] = b[j]
+	}
+	return a
+}
 
 func h2ns(x uint16) uint16 {
 	return (((x)>>8)&0xff | ((x)<<8)&0xff00)
@@ -115,6 +185,8 @@ type outstrSearchService struct {
 	endServiceCodeList uintptr
 }
 type pasori struct {
+	RC                           []byte
+	CK                           []byte
 	initializeLibrary            *syscall.Proc
 	disposeLibrary               *syscall.Proc
 	openReaderWriterAuto         *syscall.Proc
@@ -279,6 +351,52 @@ func (p *pasori) Release() {
 func (p *pasori) FelicaEnumService() (*felica, error) {
 	win.SetLastError(0)
 	return p.felicaEnumService(0xFFFF)
+}
+
+func (p *pasori) SessionKey() ([]byte, error) {
+	dummy := make([]byte, 8)
+	_, sk, err := des1(p.CK, p.RC, dummy)
+	if err != nil {
+		return nil, err
+	}
+	return sk, nil
+}
+
+func (p *pasori) CalcMAC(bdmac [][16]byte) ([]byte, error) {
+	var err error
+	sk, err := p.SessionKey()
+	if err != nil {
+		return nil, err
+	}
+
+	var mac []byte
+	prev := reverse(p.RC[:8])
+	for _, data := range bdmac[:len(bdmac)-1] {
+		prev, mac, err = des1(sk, data[:], prev)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return mac, nil
+}
+
+func (p *pasori) isRightMAC(get []byte, want [16]byte) bool {
+	return bytes.Equal(get[8:], want[:8])
+}
+
+func (p *pasori) FelicaReadWithMAC(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
+	data, err := p.FelicaReadWithoutEncryption(servicecode, append(blkno, MAC)...)
+	if err != nil {
+		return nil, err
+	}
+	mac, err := p.CalcMAC(data)
+	if err != nil {
+		return nil, err
+	}
+	if p.isRightMAC(mac, data[len(data)-1]) {
+		return data[0 : len(data)-1], nil
+	}
+	return nil, errors.New("MAC is different")
 }
 
 func (p *pasori) FelicaReadWithoutEncryption(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
