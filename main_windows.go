@@ -362,6 +362,36 @@ func (p *pasori) SessionKey() ([]byte, error) {
 	return sk, nil
 }
 
+func (p *pasori) CalcMAC_A(blkno []uint8, bdmac [][16]byte) ([]byte, error) {
+	var err error
+	sk, err := p.SessionKey()
+	if err != nil {
+		return nil, err
+	}
+
+	bchank := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	for i, no := range blkno {
+		bchank[2*i] = no
+		bchank[2*i+1] = 0
+	}
+
+	prev := reverse(p.RC[:8])
+	prev, _, err = des2(sk[:8], sk[8:], bchank, prev)
+	if err != nil {
+		return nil, err
+	}
+
+	var mac []byte
+	for _, data := range bdmac[:len(bdmac)-1] {
+		prev, mac, err = des1(sk, data[:], prev)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return mac, nil
+}
+
 func (p *pasori) CalcMAC(bdmac [][16]byte) ([]byte, error) {
 	var err error
 	sk, err := p.SessionKey()
@@ -382,6 +412,22 @@ func (p *pasori) CalcMAC(bdmac [][16]byte) ([]byte, error) {
 
 func (p *pasori) isRightMAC(get []byte, want [16]byte) bool {
 	return bytes.Equal(get[8:], want[:8])
+}
+
+func (p *pasori) FelicaReadWithMAC_A(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
+	blkno = append(blkno, MAC_A)
+	data, err := p.FelicaReadWithoutEncryption(servicecode, blkno...)
+	if err != nil {
+		return nil, err
+	}
+	mac, err := p.CalcMAC_A(blkno, data)
+	if err != nil {
+		return nil, err
+	}
+	if p.isRightMAC(mac, data[len(data)-1]) {
+		return data[0 : len(data)-1], nil
+	}
+	return nil, errors.New("MAC is different")
 }
 
 func (p *pasori) FelicaReadWithMAC(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
