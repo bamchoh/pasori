@@ -41,10 +41,10 @@ func main() {
 	}
 
 	psr.CK = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	err = psr.FelicaWriteWithoutEncryption(pasori.CK, psr.CK)
-	if err != nil {
-		panic(err)
-	}
+	// err = psr.FelicaWriteWithoutEncryption(pasori.CK, psr.CK)
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	// err = psr.FelicaWriteWithoutEncryption(pasori.CK, ck[:])
 	// if err != nil {
@@ -53,22 +53,40 @@ func main() {
 
 	rd := make([]byte, 16)
 	rand.Read(rd)
-	err = psr.FelicaWriteWithoutEncryption(pasori.S_PAD0, rd)
+	// err = psr.FelicaWriteWithoutEncryption(pasori.S_PAD0, []byte{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2})
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	mc, err := psr.FelicaReadWithMAC_A(pasori.SERVICE_RO, pasori.MC)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("mc    ", mc)
+
+	s_pad0, err := psr.FelicaReadWithMAC_A(pasori.SERVICE_RO, pasori.S_PAD0)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("s_pad0", s_pad0)
+
+	err = psr.FelicaWriteWithMAC_A(pasori.S_PAD0, []byte{3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3})
 	if err != nil {
 		panic(err)
 	}
 
-	rand.Read(rd)
-	err = psr.FelicaWriteWithoutEncryption(pasori.S_PAD1, rd)
+	s_pad0, err = psr.FelicaReadWithMAC_A(pasori.SERVICE_RO, pasori.S_PAD0)
 	if err != nil {
 		panic(err)
 	}
+	fmt.Println("s_pad0", s_pad0)
 
-	rand.Read(rd)
-	err = psr.FelicaWriteWithoutEncryption(pasori.S_PAD2, rd)
+	var b [][16]byte
+	b, err = psr.FelicaReadWithoutEncryption(pasori.SERVICE_RO, pasori.WCNT)
 	if err != nil {
 		panic(err)
 	}
+	fmt.Println(b)
 
 	id, err := psr.FelicaReadWithMAC_A(pasori.SERVICE_RO, pasori.S_PAD0, pasori.S_PAD1, pasori.S_PAD2)
 	if err != nil {
@@ -76,16 +94,4 @@ func main() {
 	}
 	fmt.Println("id:  ", id)
 
-	var b [][16]byte
-	b, err = psr.FelicaReadWithoutEncryption(pasori.SERVICE_RO, pasori.ID, pasori.CKV, pasori.MAC)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(b)
-
-	b, err = psr.FelicaReadWithoutEncryption(pasori.SERVICE_RO, pasori.S_PAD0)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(b)
 }

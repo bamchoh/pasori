@@ -184,6 +184,12 @@ type outstrSearchService struct {
 	areaCodeList       uintptr
 	endServiceCodeList uintptr
 }
+
+type WriteBlock struct {
+	No   byte
+	Data []byte
+}
+
 type pasori struct {
 	RC                           []byte
 	CK                           []byte
@@ -223,9 +229,6 @@ func (p *pasori) felicaEnumService(systemcode uint16) (*felica, error) {
 		endServiceCodeList: uintptr(unsafe.Pointer(&f.EndServiceCode[0])),
 	}
 	ret, _, err := p.pollingAndSearchServiceCode.Call(uintptr(unsafe.Pointer(&poll.systemcode)), uintptr(unsafe.Pointer(&iss.bufferSizeOfAreaCodes)), uintptr(unsafe.Pointer(&card.cardIdm)), uintptr(unsafe.Pointer(&oss.numAreaCodes)))
-	fmt.Println(ret)
-	fmt.Println(err)
-	fmt.Println(f)
 	if ret == 0 {
 		if err.(syscall.Errno) == 0 {
 			return nil, nil
@@ -303,25 +306,30 @@ func (p *pasori) felicaReadWithoutEncryption(idm *[8]uint8, servicecode uint16, 
 	return blockData[:], nil
 }
 
-func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16, blknum uint8, data []byte) error {
+func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16, wbs []WriteBlock) error {
 	var serviceCode [2]uint8
 	serviceCode[0] = uint8(servicecode & 0xff)
 	serviceCode[1] = uint8(servicecode >> 8)
 
-	var blockList [2]uint8
-	blockList[0] = 0x80
-	blockList[1] = blknum
-
-	var blockData [16]uint8
-	for i := 0; i < len(blockData); i++ {
-		blockData[i] = data[i]
+	var blockList []byte
+	for _, wb := range wbs {
+		blockList = append(blockList, 0x80)
+		blockList = append(blockList, wb.No)
 	}
+
+	var blockData []byte
+	for _, wb := range wbs {
+		blockData = append(blockData, wb.Data...)
+	}
+
+	fmt.Println("blockList", blockList)
+	fmt.Println("blockData", blockData)
 
 	iwr := instrWriteBlock{
 		cardIdm:          uintptr(unsafe.Pointer(&idm[0])),
 		numberOfServices: 1,
 		serviceCodeList:  uintptr(unsafe.Pointer(&serviceCode[0])),
-		numberOfBlocks:   1,
+		numberOfBlocks:   uint8(len(wbs)),
 		blockList:        uintptr(unsafe.Pointer(&blockList[0])),
 		blockData:        uintptr(unsafe.Pointer(&blockData[0])),
 	}
@@ -334,6 +342,9 @@ func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16,
 		statusFlag2: uintptr(unsafe.Pointer(&statusFlag2)),
 	}
 	ret, _, err := p.writeBlockWithoutEncryption.Call(uintptr(unsafe.Pointer(&iwr.cardIdm)), uintptr(unsafe.Pointer(&owr.statusFlag1)))
+
+	fmt.Printf("%02X, %02X\n", statusFlag1, statusFlag2)
+
 	if ret == 0 {
 		if err.(syscall.Errno) == 0 {
 			return nil
@@ -362,18 +373,38 @@ func (p *pasori) SessionKey() ([]byte, error) {
 	return sk, nil
 }
 
-func (p *pasori) CalcMAC_A(blkno []uint8, bdmac [][16]byte) ([]byte, error) {
+func (p *pasori) CalcWriteMAC_A(bchank []byte, data []byte) ([]byte, error) {
 	var err error
 	sk, err := p.SessionKey()
 	if err != nil {
 		return nil, err
 	}
 
-	bchank := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	prev := reverse(p.RC[:8])
+	prev, _, err = des2(sk[8:], sk[:8], bchank, prev)
+	if err != nil {
+		return nil, err
+	}
 
-	for i, no := range blkno {
-		bchank[2*i] = no
-		bchank[2*i+1] = 0
+	var mac []byte
+	sk_ := append(sk[8:], sk[:8]...)
+	prev, mac, err = des1(sk_, data[:], prev)
+	if err != nil {
+		return nil, err
+	}
+
+	macA := mac[8:]
+	macA = append(macA, bchank[:3]...)
+	macA = append(macA, []byte{0, 0, 0, 0, 0}...)
+
+	return macA, nil
+}
+
+func (p *pasori) CalcMAC_A(bchank []byte, bdmac [][16]byte) ([]byte, error) {
+	var err error
+	sk, err := p.SessionKey()
+	if err != nil {
+		return nil, err
 	}
 
 	prev := reverse(p.RC[:8])
@@ -420,7 +451,15 @@ func (p *pasori) FelicaReadWithMAC_A(servicecode uint16, blkno ...uint8) ([][16]
 	if err != nil {
 		return nil, err
 	}
-	mac, err := p.CalcMAC_A(blkno, data)
+
+	bchank := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	for i, no := range blkno {
+		bchank[2*i] = no
+		bchank[2*i+1] = 0
+	}
+
+	mac, err := p.CalcMAC_A(bchank, data)
 	if err != nil {
 		return nil, err
 	}
@@ -428,6 +467,42 @@ func (p *pasori) FelicaReadWithMAC_A(servicecode uint16, blkno ...uint8) ([][16]
 		return data[0 : len(data)-1], nil
 	}
 	return nil, errors.New("MAC is different")
+}
+
+func (p *pasori) FelicaWriteWithMAC_A(blkno uint8, data []byte) error {
+	win.SetLastError(0)
+	idm, err := p.GetIdmWithArray()
+	if err != nil {
+		return err
+	}
+
+	wcnt, err := p.FelicaReadWithoutEncryption(SERVICE_RO, WCNT)
+	if err != nil {
+		return err
+	}
+
+	bchank := append(wcnt[0][:3], []byte{0, blkno, 0, MAC_A, 0}...)
+
+	// bchank := []byte{0, 0, 0, 0, blkno, 0, MAC_A, 0}
+	// copy(bchank[:3], wcnt[0][:3])
+
+	mac, err := p.CalcWriteMAC_A(bchank, data)
+	if err != nil {
+		return err
+	}
+	fmt.Println("mac:", mac)
+
+	var wbs []WriteBlock
+	wbs = append(wbs, WriteBlock{blkno, data})
+	wbs = append(wbs, WriteBlock{MAC_A, mac})
+
+	fmt.Println("wbs:", wbs)
+
+	err = p.felicaWriteWithoutEncryption(&idm, SERVICE_RW, wbs)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *pasori) FelicaReadWithMAC(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
@@ -460,15 +535,13 @@ func (p *pasori) FelicaReadWithoutEncryption(servicecode uint16, blkno ...uint8)
 
 func (p *pasori) FelicaWriteWithoutEncryption(blkno uint8, data []byte) error {
 	win.SetLastError(0)
-	idm, err := p.GetIdm()
+	idm, err := p.GetIdmWithArray()
 	if err != nil {
 		return err
 	}
-	var idmary [8]uint8
-	for i := 0; i < len(idmary); i++ {
-		idmary[i] = idm[i]
-	}
-	return p.felicaWriteWithoutEncryption(&idmary, 9, blkno, data)
+	wbs := make([]WriteBlock, 0)
+	wbs = append(wbs, WriteBlock{blkno, data})
+	return p.felicaWriteWithoutEncryption(&idm, 9, wbs)
 }
 
 func (p *pasori) GetIdm() ([]byte, error) {
@@ -487,6 +560,18 @@ func (p *pasori) GetIdm() ([]byte, error) {
 	}
 
 	return f.IDm[:], nil
+}
+
+func (p *pasori) GetIdmWithArray() ([8]uint8, error) {
+	var idmary [8]uint8
+	idm, err := p.GetIdm()
+	if err != nil {
+		return idmary, err
+	}
+	for i := 0; i < len(idmary); i++ {
+		idmary[i] = idm[i]
+	}
+	return idmary, nil
 }
 
 type felica struct {
