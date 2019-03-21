@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"crypto/des"
 	"errors"
-	"fmt"
 	"syscall"
 	"time"
 	"unsafe"
@@ -322,9 +321,6 @@ func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16,
 		blockData = append(blockData, wb.Data...)
 	}
 
-	fmt.Println("blockList", blockList)
-	fmt.Println("blockData", blockData)
-
 	iwr := instrWriteBlock{
 		cardIdm:          uintptr(unsafe.Pointer(&idm[0])),
 		numberOfServices: 1,
@@ -342,8 +338,6 @@ func (p *pasori) felicaWriteWithoutEncryption(idm *[8]uint8, servicecode uint16,
 		statusFlag2: uintptr(unsafe.Pointer(&statusFlag2)),
 	}
 	ret, _, err := p.writeBlockWithoutEncryption.Call(uintptr(unsafe.Pointer(&iwr.cardIdm)), uintptr(unsafe.Pointer(&owr.statusFlag1)))
-
-	fmt.Printf("%02X, %02X\n", statusFlag1, statusFlag2)
 
 	if ret == 0 {
 		if err.(syscall.Errno) == 0 {
@@ -373,54 +367,131 @@ func (p *pasori) SessionKey() ([]byte, error) {
 	return sk, nil
 }
 
-func (p *pasori) CalcWriteMAC_A(bchank []byte, data []byte) ([]byte, error) {
-	var err error
-	sk, err := p.SessionKey()
+func (p *pasori) SessionKeyForWrite() ([]byte, error) {
+	tmp, err := p.SessionKey()
 	if err != nil {
 		return nil, err
 	}
-
-	prev := reverse(p.RC[:8])
-	prev, _, err = des2(sk[8:], sk[:8], bchank, prev)
-	if err != nil {
-		return nil, err
-	}
-
-	var mac []byte
-	sk_ := append(sk[8:], sk[:8]...)
-	prev, mac, err = des1(sk_, data[:], prev)
-	if err != nil {
-		return nil, err
-	}
-
-	macA := mac[8:]
-	macA = append(macA, bchank[:3]...)
-	macA = append(macA, []byte{0, 0, 0, 0, 0}...)
-
-	return macA, nil
+	sk := append(tmp[8:], tmp[:8]...)
+	return sk, nil
 }
 
-func (p *pasori) CalcMAC_A(bchank []byte, bdmac [][16]byte) ([]byte, error) {
-	var err error
-	sk, err := p.SessionKey()
+type FelicaDES struct {
+	Seed []byte
+}
+
+func (fdes *FelicaDES) Key() ([]byte, error) {
+	if len(fdes.Seed) < 16 {
+		return nil, errors.New("Length of Seed is less than 16")
+	}
+
+	key1 := fdes.Seed[:8]
+	key2 := fdes.Seed[8:]
+
+	key := make([]byte, 24)
+	copy(key[:8], reverse(key1))
+	copy(key[8:16], reverse(key2))
+	copy(key[16:], reverse(key1))
+	return key, nil
+}
+
+func (fdes *FelicaDES) Do(in []byte) ([]byte, error) {
+	key, err := fdes.Key()
 	if err != nil {
 		return nil, err
 	}
+
+	c, err := des.NewTripleDESCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	enc := make([]byte, des.BlockSize)
+
+	c.Encrypt(enc, in)
+
+	return enc, nil
+}
+
+func (p *pasori) CalcMAC_A(seed, blocks []byte) ([]byte, error) {
+	var err error
+
+	fdes := FelicaDES{Seed: seed}
 
 	prev := reverse(p.RC[:8])
-	prev, _, err = des2(sk[:8], sk[8:], bchank, prev)
-	if err != nil {
-		return nil, err
-	}
 
-	var mac []byte
-	for _, data := range bdmac[:len(bdmac)-1] {
-		prev, mac, err = des1(sk, data[:], prev)
+	for i := 0; i < len(blocks); i += 8 {
+		data2 := blocks[i : i+8]
+
+		in := xor(reverse(data2), prev)
+
+		prev, err = fdes.Do(in)
 		if err != nil {
 			return nil, err
 		}
 	}
+
+	return reverse(prev), nil
+}
+
+func (p *pasori) CalcWriteMAC_A(blkno uint8, data []byte) ([]byte, error) {
+	var err error
+
+	wcnt, err := p.GetWCNT()
+	if err != nil {
+		return nil, err
+	}
+
+	initBlock := []byte{
+		wcnt[0],
+		wcnt[1],
+		wcnt[2],
+		0,
+		blkno,
+		0,
+		MAC_A,
+		0,
+	}
+
+	blocks := append(initBlock, data...)
+
+	seed, err := p.SessionKeyForWrite()
+	if err != nil {
+		return nil, err
+	}
+
+	mac, err := p.CalcMAC_A(seed, blocks)
+	if err != nil {
+		return nil, err
+	}
+
+	mac = append(mac, wcnt...)
+	mac = append(mac, []byte{0, 0, 0, 0, 0}...)
+
 	return mac, nil
+}
+
+func (p *pasori) CalcReadMAC_A(blkno []byte, data [][16]byte) ([]byte, error) {
+	var err error
+
+	initBlock := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
+	for i, no := range blkno {
+		initBlock[2*i] = no
+		initBlock[2*i+1] = 0
+	}
+
+	blocks := initBlock
+	for _, block := range data[:len(data)-1] {
+		blocks = append(blocks, block[:]...)
+	}
+
+	seed, err := p.SessionKey()
+	if err != nil {
+		return nil, err
+	}
+
+	return p.CalcMAC_A(seed, blocks)
 }
 
 func (p *pasori) CalcMAC(bdmac [][16]byte) ([]byte, error) {
@@ -442,7 +513,7 @@ func (p *pasori) CalcMAC(bdmac [][16]byte) ([]byte, error) {
 }
 
 func (p *pasori) isRightMAC(get []byte, want [16]byte) bool {
-	return bytes.Equal(get[8:], want[:8])
+	return bytes.Equal(get, want[:8])
 }
 
 func (p *pasori) FelicaReadWithMAC_A(servicecode uint16, blkno ...uint8) ([][16]byte, error) {
@@ -452,21 +523,24 @@ func (p *pasori) FelicaReadWithMAC_A(servicecode uint16, blkno ...uint8) ([][16]
 		return nil, err
 	}
 
-	bchank := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
-
-	for i, no := range blkno {
-		bchank[2*i] = no
-		bchank[2*i+1] = 0
-	}
-
-	mac, err := p.CalcMAC_A(bchank, data)
+	mac, err := p.CalcReadMAC_A(blkno, data)
 	if err != nil {
 		return nil, err
 	}
+
 	if p.isRightMAC(mac, data[len(data)-1]) {
 		return data[0 : len(data)-1], nil
 	}
 	return nil, errors.New("MAC is different")
+}
+
+func (p *pasori) GetWCNT() ([]byte, error) {
+	wcnt, err := p.FelicaReadWithoutEncryption(SERVICE_RO, WCNT)
+	if err != nil {
+		return nil, err
+	}
+
+	return wcnt[0][:3], nil
 }
 
 func (p *pasori) FelicaWriteWithMAC_A(blkno uint8, data []byte) error {
@@ -476,27 +550,14 @@ func (p *pasori) FelicaWriteWithMAC_A(blkno uint8, data []byte) error {
 		return err
 	}
 
-	wcnt, err := p.FelicaReadWithoutEncryption(SERVICE_RO, WCNT)
+	mac, err := p.CalcWriteMAC_A(blkno, data)
 	if err != nil {
 		return err
 	}
-
-	bchank := append(wcnt[0][:3], []byte{0, blkno, 0, MAC_A, 0}...)
-
-	// bchank := []byte{0, 0, 0, 0, blkno, 0, MAC_A, 0}
-	// copy(bchank[:3], wcnt[0][:3])
-
-	mac, err := p.CalcWriteMAC_A(bchank, data)
-	if err != nil {
-		return err
-	}
-	fmt.Println("mac:", mac)
 
 	var wbs []WriteBlock
 	wbs = append(wbs, WriteBlock{blkno, data})
 	wbs = append(wbs, WriteBlock{MAC_A, mac})
-
-	fmt.Println("wbs:", wbs)
 
 	err = p.felicaWriteWithoutEncryption(&idm, SERVICE_RW, wbs)
 	if err != nil {
